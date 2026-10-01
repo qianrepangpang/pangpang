@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+build/
+dist/
+*.exe
+*.bak.exe
+_download_state.json
+_download_log.txt
+_download_complete.flag
+_runner.pid
+*.part
+*.seg
+*.assemble
+*.tmp
+.venv/
