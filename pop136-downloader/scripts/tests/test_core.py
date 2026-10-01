@@ -15,6 +15,7 @@ from pop136_core import (
     pending_state_jobs,
     page_batch,
     profile_lock_message,
+    repair_invalid_state_files,
     record_files_complete,
     record_finished_for_run,
     reactivate_timed_out_files,
@@ -37,6 +38,7 @@ from pop136_core import (
     Pop136Engine,
     remember_browser_routes,
     use_browser_route,
+    valid_download_url,
     browser_launch_args,
     login_browser_launch_args,
     download_browser_headless,
@@ -45,6 +47,24 @@ from pop136_core import (
 
 
 class CoreTests(unittest.TestCase):
+    def test_invalid_download_urls_are_rejected(self):
+        self.assertFalse(valid_download_url("https://imgyt2.pop-fashion.com/undefined"))
+        self.assertFalse(valid_download_url("undefined"))
+        self.assertTrue(valid_download_url("https://imgyt2.pop-fashion.com/path/file.ai"))
+
+    def test_invalid_state_files_are_reset_for_detail_recollection(self):
+        state = {
+            "processed": {
+                "810755": {
+                    "selection_checked": True,
+                    "files": [{"name": "810755_3", "url": "https://imgyt2.pop-fashion.com/undefined"}],
+                }
+            }
+        }
+        self.assertEqual(repair_invalid_state_files(state), 1)
+        self.assertEqual(state["processed"]["810755"]["files"], [])
+        self.assertEqual(state["processed"]["810755"]["status"], "retry_detail")
+
     def test_single_file_timeout_is_two_minutes(self):
         self.assertEqual(FILE_DOWNLOAD_TIMEOUT_SECONDS, 2 * 60)
 

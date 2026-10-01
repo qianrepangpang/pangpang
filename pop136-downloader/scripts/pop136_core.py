@@ -22,7 +22,7 @@ from playwright.sync_api import sync_playwright
 
 
 START_URL = "https://yuntu.pop136.com/patternlibrary/"
-APP_VERSION = "2.1.1"
+APP_VERSION = "2.1.2"
 LOGIN_DEBUG_PORT = 9223
 EXCLUDED_SUFFIXES = {".psd", ".eps"}
 EXPECTED_CARDS_PER_PAGE = 60
@@ -420,6 +420,8 @@ def record_finished_for_run(
     item_id: str | None = None,
     known: set[str] | None = None,
 ) -> bool:
+    if record.get("status") == "retry_detail":
+        return False
     files = record.get("files", [])
     selected = [index for index, file in enumerate(files) if should_download(file.get("name", ""))]
     if selected:
@@ -441,7 +443,7 @@ def pending_state_jobs(target: Path, state: dict) -> list[dict]:
     jobs = []
     for item_id, record in state.get("processed", {}).items():
         for index, file in enumerate(record.get("files", [])):
-            if not should_download(file.get("name", "")) or not file.get("url"):
+            if not should_download(file.get("name", "")) or not valid_download_url(file.get("url")):
                 continue
             if file.get("status") == "skipped_timeout":
                 continue
@@ -449,6 +451,24 @@ def pending_state_jobs(target: Path, state: dict) -> list[dict]:
                 continue
             jobs.append({"id": item_id, "name": file["name"], "url": file["url"]})
     return jobs
+
+
+def repair_invalid_state_files(state: dict) -> int:
+    repaired = 0
+    for record in state.get("processed", {}).values():
+        files = record.get("files", [])
+        invalid = [
+            file for file in files
+            if should_download(file.get("name", "")) and not valid_download_url(file.get("url"))
+        ]
+        if not invalid:
+            continue
+        record["files"] = [file for file in files if file not in invalid]
+        record["selection_checked"] = False
+        record["status"] = "retry_detail"
+        record.pop("completed", None)
+        repaired += len(invalid)
+    return repaired
 
 
 def reactivate_timed_out_files(path: Path) -> int:
@@ -538,6 +558,13 @@ def candidate_urls(url: str) -> list[str]:
         hosts = [parsed.hostname] + [f"imgyt{index}.pop-fashion.com" for index in (1, 2, 3)]
         return [urlunsplit(parsed._replace(netloc=host)) for host in dict.fromkeys(hosts)]
     return [urlunsplit(parsed)]
+
+
+def valid_download_url(url: object) -> bool:
+    parsed = urlsplit(str(url or "").strip())
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return False
+    return parsed.path.rstrip("/").rsplit("/", 1)[-1].casefold() not in {"", "undefined", "null"}
 
 
 def wait_for_full_card_page(page, cards_locator, page_no: int, scroll_rounds: int = 12) -> int:
@@ -755,7 +782,10 @@ class Pop136Engine:
         self.target.mkdir(parents=True, exist_ok=True)
         self.profile.mkdir(parents=True, exist_ok=True)
         state = load_state(self.state_path, self.year)
+        repaired = repair_invalid_state_files(state)
         self.log(f"启动 v{APP_VERSION}，已扫描 {len(existing_names(self.target))} 个已有文件")
+        if repaired:
+            self.log(f"已清理 {repaired} 个无效断点地址，将重新采集详情")
         if not cdp_ready():
             subprocess.Popen(
                 [str(self.browser_path()), *login_browser_launch_args(self.profile)],
@@ -1219,13 +1249,17 @@ class Pop136Engine:
         big_image = detail_frame.locator(".bigbox").get_attribute("src")
         files = []
         for item in raw_files:
-            if not item.get("name") or not item.get("relativeUrl"):
+            name = str(item.get("name") or "").replace("\n", "").strip()
+            relative_url = str(item.get("relativeUrl") or "").strip()
+            if not name or name in {".", ".."} or relative_url.casefold() in {"", "undefined", "null", "."}:
                 continue
             base = item.get("previewUrl") or big_image
             if not base:
                 continue
             origin = f"{urlparse(base).scheme}://{urlparse(base).netloc}/"
-            files.append({"name": item["name"].replace("\n", "").strip(), "url": urljoin(origin, item["relativeUrl"])})
+            url = urljoin(origin, relative_url)
+            if valid_download_url(url):
+                files.append({"name": name, "url": url})
         return files
 
     def _download_jobs(self, jobs: list[dict], state: dict, cookie_header: str = "") -> None:
