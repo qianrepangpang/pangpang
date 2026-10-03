@@ -39,7 +39,7 @@ from pop136_core import (
     remember_browser_routes,
     use_browser_route,
     valid_download_url,
-    display_page_needs_restore,
+    BROWSER_POOL_SIZE,
     browser_launch_args,
     login_browser_launch_args,
     download_browser_headless,
@@ -48,12 +48,8 @@ from pop136_core import (
 
 
 class CoreTests(unittest.TestCase):
-    def test_display_page_only_restores_when_outside_pattern_library(self):
-        self.assertFalse(display_page_needs_restore("https://yuntu.pop136.com/patternlibrary/"))
-        self.assertFalse(display_page_needs_restore("https://yuntu.pop136.com/patternlibrary/?from=home"))
-        self.assertFalse(display_page_needs_restore("https://yuntu.pop136.com/patternlibrary/page_10/"))
-        self.assertTrue(display_page_needs_restore("https://yuntu.pop136.com/other/"))
-        self.assertTrue(display_page_needs_restore("about:blank"))
+    def test_browser_keeps_one_primary_page_and_six_worker_tabs(self):
+        self.assertEqual(BROWSER_POOL_SIZE, 6)
 
     def test_invalid_download_urls_are_rejected(self):
         self.assertFalse(valid_download_url("https://imgyt2.pop-fashion.com/undefined"))

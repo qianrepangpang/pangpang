@@ -22,9 +22,10 @@ from playwright.sync_api import sync_playwright
 
 
 START_URL = "https://yuntu.pop136.com/patternlibrary/"
-APP_VERSION = "2.1.3"
+APP_VERSION = "2.1.4"
 LOGIN_DEBUG_PORT = 9223
 DISPLAY_CHECK_SECONDS = 30 * 60
+BROWSER_POOL_SIZE = 6
 EXCLUDED_SUFFIXES = {".psd", ".eps"}
 EXPECTED_CARDS_PER_PAGE = 60
 FILE_DOWNLOAD_TIMEOUT_SECONDS = 2 * 60
@@ -33,11 +34,6 @@ FILE_DOWNLOAD_TIMEOUT_SECONDS = 2 * 60
 # 依据：全库 112,175 个文件中 HTML 标记文件为 0；32/64/128/256/512 KB
 # 五个阈值下「新旧实现逐名差集」均为 0（实测见 扫描优化/html-groundtruth.json）。
 HTML_SNIFF_MAX_BYTES = 32 * 1024
-
-
-def display_page_needs_restore(url: str) -> bool:
-    parsed = urlsplit(str(url or ""))
-    return parsed.scheme not in {"http", "https"} or parsed.netloc != "yuntu.pop136.com" or not parsed.path.rstrip("/").startswith("/patternlibrary")
 
 
 class HtmlChallenge(RuntimeError):
@@ -765,7 +761,6 @@ class Pop136Engine:
         self._verification_page = None
         self._verification_url = ""
         self._browser_tabs = []
-        self._display_page = None
         self._display_check_at = 0.0
 
     def log(self, message: str) -> None:
@@ -825,14 +820,12 @@ class Pop136Engine:
                 closed_pages = close_extra_browser_pages(context, page)
                 if closed_pages:
                     self.log(f"已清理 {closed_pages} 个历史浏览器页面")
-                self._display_page = context.new_page()
-                self._display_page.goto(START_URL, wait_until="domcontentloaded", timeout=30_000)
-                self._display_page.bring_to_front()
+                page.bring_to_front()
                 self._display_check_at = time.monotonic() + DISPLAY_CHECK_SECONDS
                 self._browser_tabs = create_browser_pool_tabs(
                     context,
                     page,
-                    browser_batch_size(stable_concurrency_cap()),
+                    BROWSER_POOL_SIZE,
                 )
                 # 2026-09-23 v1.7.6：删除此处「把窗口最小化」的 CDP 调用。
                 # 原代码：Browser.getWindowForTarget + setWindowBounds{windowState:minimized}
@@ -844,7 +837,7 @@ class Pop136Engine:
                     return
                 page_no = next_page(state)
                 while not self.stop_event.is_set():
-                    self._ensure_display_page(context)
+                    self._ensure_primary_page(page)
                     stop = self._process_page(page, page_no, state)
                     if stop:
                         break
@@ -862,22 +855,19 @@ class Pop136Engine:
                     except Exception:
                         pass
                 self._browser_tabs = []
-                self._display_page = None
                 # connect_over_cdp 的连接自然断开，登录 Chrome 保持打开。
         self.log("任务已暂停" if self.stop_event.is_set() else "目标年份下载完成")
 
-    def _ensure_display_page(self, context) -> None:
+    def _ensure_primary_page(self, page) -> None:
         if time.monotonic() < self._display_check_at:
             return
         try:
-            if self._display_page is None or self._display_page.is_closed():
-                self._display_page = context.new_page()
-            if display_page_needs_restore(self._display_page.url):
-                self._display_page.goto(START_URL, wait_until="domcontentloaded", timeout=30_000)
-            self._display_page.bring_to_front()
+            if page.is_closed():
+                raise RuntimeError("第一个图案库标签页已关闭")
+            page.bring_to_front()
             self._display_check_at = time.monotonic() + DISPLAY_CHECK_SECONDS
         except Exception as error:
-            self.log(f"浏览器首页校正失败，将在下个周期重试：{error}")
+            self.log(f"图案库首页切换失败，将在下个周期重试：{error}")
             self._display_check_at = time.monotonic() + 60
 
     @staticmethod
