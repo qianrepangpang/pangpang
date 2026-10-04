@@ -22,9 +22,9 @@ from playwright.sync_api import sync_playwright
 
 
 START_URL = "https://yuntu.pop136.com/patternlibrary/"
-APP_VERSION = "2.1.5"
+APP_VERSION = "2.1.6"
 LOGIN_DEBUG_PORT = 9223
-DISPLAY_CHECK_SECONDS = 10 * 60
+DISPLAY_CHECK_SECONDS = 5 * 60
 BROWSER_POOL_SIZE = 6
 EXCLUDED_SUFFIXES = {".psd", ".eps"}
 EXPECTED_CARDS_PER_PAGE = 60

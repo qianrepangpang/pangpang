@@ -52,8 +52,8 @@ class CoreTests(unittest.TestCase):
     def test_browser_keeps_one_primary_page_and_six_worker_tabs(self):
         self.assertEqual(BROWSER_POOL_SIZE, 6)
 
-    def test_primary_page_is_activated_every_ten_minutes(self):
-        self.assertEqual(DISPLAY_CHECK_SECONDS, 10 * 60)
+    def test_primary_page_is_activated_every_five_minutes(self):
+        self.assertEqual(DISPLAY_CHECK_SECONDS, 5 * 60)
 
     def test_invalid_download_urls_are_rejected(self):
         self.assertFalse(valid_download_url("https://imgyt2.pop-fashion.com/undefined"))
