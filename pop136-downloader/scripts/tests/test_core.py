@@ -40,6 +40,7 @@ from pop136_core import (
     use_browser_route,
     valid_download_url,
     BROWSER_POOL_SIZE,
+    DISPLAY_CHECK_SECONDS,
     browser_launch_args,
     login_browser_launch_args,
     download_browser_headless,
@@ -50,6 +51,9 @@ from pop136_core import (
 class CoreTests(unittest.TestCase):
     def test_browser_keeps_one_primary_page_and_six_worker_tabs(self):
         self.assertEqual(BROWSER_POOL_SIZE, 6)
+
+    def test_primary_page_is_activated_every_ten_minutes(self):
+        self.assertEqual(DISPLAY_CHECK_SECONDS, 10 * 60)
 
     def test_invalid_download_urls_are_rejected(self):
         self.assertFalse(valid_download_url("https://imgyt2.pop-fashion.com/undefined"))
