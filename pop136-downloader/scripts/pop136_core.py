@@ -22,7 +22,7 @@ from playwright.sync_api import sync_playwright
 
 
 START_URL = "https://yuntu.pop136.com/patternlibrary/"
-APP_VERSION = "2.1.10"
+APP_VERSION = "2.1.12"
 LOGIN_DEBUG_PORT = 9223
 CDP_CONNECT_TIMEOUT_MS = 30_000
 DISPLAY_CHECK_SECONDS = 10 * 60
@@ -74,6 +74,12 @@ def start_browser_timeout_watchdog(
     timer.daemon = True
     timer.start()
     return timer, expired
+
+
+def stop_browser_timeout_watchdog(timer: threading.Timer) -> None:
+    timer.cancel()
+    if timer.is_alive():
+        timer.join(timeout=1)
 
 
 def safe_filename(value: str) -> str:
@@ -567,14 +573,14 @@ def save_state(path: Path, state: dict) -> None:
 
 
 def _remote_size(session: requests.Session, url: str) -> int:
-    response = session.head(url, allow_redirects=True, timeout=(20, 30))
-    response.raise_for_status()
-    if "text/html" in response.headers.get("Content-Type", "").casefold():
-        raise HtmlChallenge("服务器返回了网页验证，而不是下载文件")
-    value = response.headers.get("Content-Length", "")
-    if not value.isdigit():
-        raise RuntimeError("服务器未返回文件大小，无法校验")
-    return int(value)
+    with session.head(url, allow_redirects=True, timeout=(20, 30)) as response:
+        response.raise_for_status()
+        if "text/html" in response.headers.get("Content-Type", "").casefold():
+            raise HtmlChallenge("服务器返回了网页验证，而不是下载文件")
+        value = response.headers.get("Content-Length", "")
+        if not value.isdigit():
+            raise RuntimeError("服务器未返回文件大小，无法校验")
+        return int(value)
 
 
 def candidate_urls(url: str) -> list[str]:
@@ -702,67 +708,65 @@ def download_file(
     partial = destination.with_name(destination.name + ".part")
     if partial.exists() and not is_valid_download(partial):
         partial.unlink()
-    session = requests.Session()
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 POP136LocalDownloader/1.0",
-        "Referer": "https://yuntu.pop136.com/",
-        "Origin": "https://yuntu.pop136.com",
-        "Connection": "close",
-    })
-    if cookie_header:
-        session.headers["Cookie"] = cookie_header
-    try:
-        total = _remote_size(session, url)
-    except HtmlChallenge:
-        return _download_with_curl(url, destination, stop_event, cookie_header, file_progress, deadline)
-    choices = candidate_urls(url)
-    selected_index = 0
-    for attempt in range(1, 101):
-        if time.monotonic() >= deadline:
-            raise DownloadTimeout("下载超过 2 分钟，已跳过")
-        if stop_event.is_set():
-            return {"status": "paused", "bytes": partial.stat().st_size if partial.exists() else 0}
-        current = partial.stat().st_size if partial.exists() else 0
-        report_progress(current, total, force=True)
-        if current == total:
-            os.replace(partial, destination)
-            return {"status": "downloaded", "bytes": total}
-        if current > total:
-            raise RuntimeError(f"断点尺寸异常：{current}>{total}")
-        headers = {"Range": f"bytes={current}-{total - 1}"} if current else {}
+    with requests.Session() as session:
+        session.headers.update({
+            "User-Agent": "Mozilla/5.0 POP136LocalDownloader/1.0",
+            "Referer": "https://yuntu.pop136.com/",
+            "Origin": "https://yuntu.pop136.com",
+            "Connection": "close",
+        })
+        if cookie_header:
+            session.headers["Cookie"] = cookie_header
         try:
-            selected_url = choices[selected_index]
-            with session.get(selected_url, headers=headers, allow_redirects=True, stream=True, timeout=(15, 5)) as response:
-                response.raise_for_status()
-                if "text/html" in response.headers.get("Content-Type", "").casefold():
-                    raise HtmlChallenge("服务器返回网页验证，需在浏览器手动完成验证")
-                if current and response.status_code != 206:
-                    raise RuntimeError(f"服务器拒绝断点续传，HTTP {response.status_code}")
-                with partial.open("ab" if current else "wb") as output:
-                    # CDN 可能只返回几十 KiB 就停顿，8 KiB 写入可确保断点不丢。
-                    for chunk in response.iter_content(chunk_size=8 * 1024):
-                        if stop_event.is_set():
-                            return {"status": "paused", "bytes": output.tell()}
-                        if time.monotonic() >= deadline:
-                            raise DownloadTimeout("下载超过 2 分钟，已跳过")
-                        if chunk:
-                            remaining = total - output.tell()
-                            output.write(chunk[:remaining])
-                            report_progress(output.tell(), total)
-                            if output.tell() == total:
-                                report_progress(total, total, force=True)
-                                break
+            total = _remote_size(session, url)
         except HtmlChallenge:
-            # The CDN returned a verification page. Switch to the signed-in browser now,
-            # rather than spending up to 100 HTTP retries on the same blocked route.
-            raise
-        except (requests.RequestException, OSError, RuntimeError):
-            progressed = partial.stat().st_size if partial.exists() else 0
-            if progressed == current:
-                selected_index = (selected_index + 1) % len(choices)
-            if attempt == 100:
+            return _download_with_curl(url, destination, stop_event, cookie_header, file_progress, deadline)
+        choices = candidate_urls(url)
+        selected_index = 0
+        for attempt in range(1, 101):
+            if time.monotonic() >= deadline:
+                raise DownloadTimeout("下载超过 2 分钟，已跳过")
+            if stop_event.is_set():
+                return {"status": "paused", "bytes": partial.stat().st_size if partial.exists() else 0}
+            current = partial.stat().st_size if partial.exists() else 0
+            report_progress(current, total, force=True)
+            if current == total:
+                os.replace(partial, destination)
+                return {"status": "downloaded", "bytes": total}
+            if current > total:
+                raise RuntimeError(f"断点尺寸异常：{current}>{total}")
+            headers = {"Range": f"bytes={current}-{total - 1}"} if current else {}
+            try:
+                selected_url = choices[selected_index]
+                with session.get(selected_url, headers=headers, allow_redirects=True, stream=True, timeout=(15, 5)) as response:
+                    response.raise_for_status()
+                    if "text/html" in response.headers.get("Content-Type", "").casefold():
+                        raise HtmlChallenge("服务器返回网页验证，需在浏览器手动完成验证")
+                    if current and response.status_code != 206:
+                        raise RuntimeError(f"服务器拒绝断点续传，HTTP {response.status_code}")
+                    with partial.open("ab" if current else "wb") as output:
+                        # CDN 可能只返回几十 KiB 就停顿，8 KiB 写入可确保断点不丢。
+                        for chunk in response.iter_content(chunk_size=8 * 1024):
+                            if stop_event.is_set():
+                                return {"status": "paused", "bytes": output.tell()}
+                            if time.monotonic() >= deadline:
+                                raise DownloadTimeout("下载超过 2 分钟，已跳过")
+                            if chunk:
+                                remaining = total - output.tell()
+                                output.write(chunk[:remaining])
+                                report_progress(output.tell(), total)
+                                if output.tell() == total:
+                                    report_progress(total, total, force=True)
+                                    break
+            except HtmlChallenge:
                 raise
-            time.sleep(min(3, attempt))
+            except (requests.RequestException, OSError, RuntimeError):
+                progressed = partial.stat().st_size if partial.exists() else 0
+                if progressed == current:
+                    selected_index = (selected_index + 1) % len(choices)
+                if attempt == 100:
+                    raise
+                time.sleep(min(3, attempt))
     raise RuntimeError("下载重试次数已用尽")
 
 
@@ -1452,7 +1456,7 @@ class Pop136Engine:
                     self.log(f"{job['name']} {message}：{error}")
                     failed += 1
                 finally:
-                    timer.cancel()
+                    stop_browser_timeout_watchdog(timer)
                     if tab.is_closed():
                         self._replace_browser_tab(context, index)
                 finished += 1

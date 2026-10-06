@@ -47,6 +47,7 @@ from pop136_core import (
     download_browser_headless,
     wait_for_full_card_page,
     start_browser_timeout_watchdog,
+    stop_browser_timeout_watchdog,
 )
 from pop136_app import (
     UNATTENDED_VERIFICATION_SHUTDOWN_SECONDS,
@@ -104,8 +105,7 @@ class CoreTests(unittest.TestCase):
     def test_cancelled_browser_timeout_watchdog_does_not_close_target(self):
         closed = []
         timer, expired = start_browser_timeout_watchdog("target-1", 1, closed.append)
-        timer.cancel()
-        timer.join(1)
+        stop_browser_timeout_watchdog(timer)
         self.assertFalse(expired.is_set())
         self.assertEqual(closed, [])
 
