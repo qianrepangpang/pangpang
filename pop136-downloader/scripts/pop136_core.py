@@ -22,8 +22,9 @@ from playwright.sync_api import sync_playwright
 
 
 START_URL = "https://yuntu.pop136.com/patternlibrary/"
-APP_VERSION = "2.1.6"
+APP_VERSION = "2.1.8"
 LOGIN_DEBUG_PORT = 9223
+CDP_CONNECT_TIMEOUT_MS = 30_000
 DISPLAY_CHECK_SECONDS = 5 * 60
 BROWSER_POOL_SIZE = 6
 EXCLUDED_SUFFIXES = {".psd", ".eps"}
@@ -46,6 +47,33 @@ class DownloadTimeout(RuntimeError):
 
 class DetailUnavailable(RuntimeError):
     pass
+
+
+def close_browser_target(target_id: str) -> None:
+    try:
+        urllib.request.urlopen(
+            f"http://127.0.0.1:{LOGIN_DEBUG_PORT}/json/close/{quote(target_id)}",
+            timeout=10,
+        ).close()
+    except Exception:
+        pass
+
+
+def start_browser_timeout_watchdog(
+    target_id: str,
+    timeout_seconds: float,
+    close_target: Callable[[str], None] = close_browser_target,
+) -> tuple[threading.Timer, threading.Event]:
+    expired = threading.Event()
+
+    def expire() -> None:
+        expired.set()
+        close_target(target_id)
+
+    timer = threading.Timer(timeout_seconds, expire)
+    timer.daemon = True
+    timer.start()
+    return timer, expired
 
 
 def safe_filename(value: str) -> str:
@@ -800,7 +828,8 @@ class Pop136Engine:
         with sync_playwright() as playwright:
             try:
                 attached_browser = playwright.chromium.connect_over_cdp(
-                    f"http://127.0.0.1:{LOGIN_DEBUG_PORT}"
+                    f"http://127.0.0.1:{LOGIN_DEBUG_PORT}",
+                    timeout=CDP_CONNECT_TIMEOUT_MS,
                 )
                 context = attached_browser.contexts[0]
                 self.log("已接管完成登录/验证码的浏览器")
@@ -1372,13 +1401,16 @@ class Pop136Engine:
                 tab = self._browser_tabs[index]
                 self.log(f"{job['name']}：下载中")
                 deadline = time.monotonic() + FILE_DOWNLOAD_TIMEOUT_SECONDS
+                timer, expired = self._start_browser_watchdog(context, tab)
                 try:
                     response = tab.goto(job["url"], wait_until="commit", timeout=45_000)
-                    active.append((job, tab, response, deadline))
+                    active.append((index, job, tab, response, deadline, timer, expired))
                 except Exception as error:
-                    active.append((job, tab, error, deadline))
-            for job, tab, result, deadline in active:
+                    active.append((index, job, tab, error, deadline, timer, expired))
+            for index, job, tab, result, deadline, timer, expired in active:
                 try:
+                    if expired.is_set():
+                        raise DownloadTimeout("下载超过 2 分钟，已跳过")
                     if isinstance(result, Exception):
                         raise result
                     if result is None:
@@ -1408,6 +1440,8 @@ class Pop136Engine:
                     self.log(f"{job['name']}：browser_downloaded")
                     successful += 1
                 except Exception as error:
+                    if expired.is_set() and not isinstance(error, DownloadTimeout):
+                        error = DownloadTimeout("下载超过 2 分钟，已跳过")
                     status = "verification_required" if isinstance(error, HtmlChallenge) else (
                         "skipped_timeout" if isinstance(error, DownloadTimeout) else "failed"
                     )
@@ -1417,6 +1451,10 @@ class Pop136Engine:
                     )
                     self.log(f"{job['name']} {message}：{error}")
                     failed += 1
+                finally:
+                    timer.cancel()
+                    if tab.is_closed():
+                        self._replace_browser_tab(context, index)
                 finished += 1
                 self.progress(finished, len(entries), job["name"])
                 if should_checkpoint(finished):
@@ -1427,6 +1465,21 @@ class Pop136Engine:
         if state["concurrencyLimit"] != concurrency_limit:
             self.log(f"Chrome 下载自适应并发调整：{concurrency_limit} -> {state['concurrencyLimit']}")
         save_state(self.state_path, state)
+
+    @staticmethod
+    def _start_browser_watchdog(context, tab) -> tuple[threading.Timer, threading.Event]:
+        session = context.new_cdp_session(tab)
+        try:
+            target_id = session.send("Target.getTargetInfo")["targetInfo"]["targetId"]
+        finally:
+            session.detach()
+        return start_browser_timeout_watchdog(target_id, FILE_DOWNLOAD_TIMEOUT_SECONDS)
+
+    def _replace_browser_tab(self, context, index: int) -> None:
+        anchor = next((page for page in context.pages if not page.is_closed()), None)
+        if anchor is None:
+            raise RuntimeError("浏览器已无可用标签页")
+        self._browser_tabs[index] = create_browser_pool_tabs(context, anchor, 1)[0]
 
     def _download_browser_stream(self, context, job: dict, tab, deadline: float) -> int:
         """Stream a large response before Chrome's inspector cache can evict it."""

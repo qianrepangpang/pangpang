@@ -41,10 +41,12 @@ from pop136_core import (
     valid_download_url,
     BROWSER_POOL_SIZE,
     DISPLAY_CHECK_SECONDS,
+    CDP_CONNECT_TIMEOUT_MS,
     browser_launch_args,
     login_browser_launch_args,
     download_browser_headless,
     wait_for_full_card_page,
+    start_browser_timeout_watchdog,
 )
 
 
@@ -54,6 +56,24 @@ class CoreTests(unittest.TestCase):
 
     def test_primary_page_is_activated_every_five_minutes(self):
         self.assertEqual(DISPLAY_CHECK_SECONDS, 5 * 60)
+
+    def test_browser_session_connect_has_a_hard_timeout(self):
+        self.assertEqual(CDP_CONNECT_TIMEOUT_MS, 30_000)
+
+    def test_browser_timeout_watchdog_closes_stuck_target(self):
+        closed = []
+        timer, expired = start_browser_timeout_watchdog("target-1", 0.01, closed.append)
+        self.assertTrue(expired.wait(1))
+        timer.join(1)
+        self.assertEqual(closed, ["target-1"])
+
+    def test_cancelled_browser_timeout_watchdog_does_not_close_target(self):
+        closed = []
+        timer, expired = start_browser_timeout_watchdog("target-1", 1, closed.append)
+        timer.cancel()
+        timer.join(1)
+        self.assertFalse(expired.is_set())
+        self.assertEqual(closed, [])
 
     def test_invalid_download_urls_are_rejected(self):
         self.assertFalse(valid_download_url("https://imgyt2.pop-fashion.com/undefined"))
