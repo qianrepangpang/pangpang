@@ -23,7 +23,7 @@ from playwright.sync_api import sync_playwright
 
 
 START_URL = "https://yuntu.pop136.com/patternlibrary/"
-APP_VERSION = "2.1.18"
+APP_VERSION = "2.1.19"
 LOGIN_DEBUG_PORT = 9223
 CDP_CONNECT_TIMEOUT_MS = 30_000
 DISPLAY_CHECK_SECONDS = 10 * 60
@@ -47,6 +47,10 @@ class DownloadTimeout(RuntimeError):
 
 
 class DetailUnavailable(RuntimeError):
+    pass
+
+
+class BrowserSessionRecycle(RuntimeError):
     pass
 
 
@@ -879,6 +883,7 @@ class Pop136Engine:
                     if stop:
                         break
                     page_no += 1
+                    raise BrowserSessionRecycle()
             finally:
                 save_state(self.state_path, state)
                 # 2026-09-23 v1.7.6：回收本轮自建的 8 个池标签。

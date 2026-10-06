@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+import gc
 import json
 import os
 import queue
@@ -13,6 +14,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from pop136_core import (
     APP_VERSION,
+    BrowserSessionRecycle,
     Pop136Engine,
     cdp_ready,
     login_browser_launch_args,
@@ -348,6 +350,10 @@ class App(tk.Tk):
                 engine.run()
                 self.events.put(("done", "任务已暂停" if self.stop_event.is_set() else "全部年份下载完成"))
                 return
+            except BrowserSessionRecycle:
+                attempt = 0
+                gc.collect()
+                continue
             except Exception as error:
                 attempt += 1
                 delay = retry_delay_seconds(attempt)
