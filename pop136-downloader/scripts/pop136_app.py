@@ -19,11 +19,66 @@ from pop136_core import (
     make_diagnostic_bundle,
     reactivate_timed_out_files,
     retry_delay_seconds,
+    is_verification_error,
 )
 
 
 CONFIG_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "POP136Downloader"
 CONFIG_PATH = CONFIG_DIR / "config.json"
+UNATTENDED_VERIFICATION_SHUTDOWN_SECONDS = 10 * 60
+
+
+class LastInputInfo(ctypes.Structure):
+    _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_uint)]
+
+
+def windows_last_input_tick() -> int:
+    info = LastInputInfo()
+    info.cbSize = ctypes.sizeof(info)
+    if ctypes.windll.user32.GetLastInputInfo(ctypes.byref(info)):
+        return int(info.dwTime)
+    return 0
+
+
+def requires_manual_verification(text: str) -> bool:
+    return is_verification_error(text) or any(
+        marker in text for marker in ("登录或验证状态已失效", "请完成登录或验证码")
+    )
+
+
+def download_progress_clears_verification(text: str) -> bool:
+    return any(
+        marker in text
+        for marker in ("：downloaded", "：browser_downloaded", "页处理", "进入第")
+    )
+
+
+def should_resume_from_args(args: list[str]) -> bool:
+    return "--resume" in args[1:]
+
+
+class VerificationShutdownGuard:
+    def __init__(self) -> None:
+        self.deadline: float | None = None
+        self.last_input_tick = 0
+
+    def arm(self, now: float, input_tick: int) -> None:
+        if self.deadline is None:
+            self.deadline = now + UNATTENDED_VERIFICATION_SHUTDOWN_SECONDS
+            self.last_input_tick = input_tick
+
+    def clear(self) -> None:
+        self.deadline = None
+        self.last_input_tick = 0
+
+    def check(self, now: float, input_tick: int) -> bool:
+        if self.deadline is None:
+            return False
+        if input_tick != self.last_input_tick:
+            self.last_input_tick = input_tick
+            self.deadline = now + UNATTENDED_VERIFICATION_SHUTDOWN_SECONDS
+            return False
+        return now >= self.deadline
 
 
 def process_exists(pid: int) -> bool:
@@ -97,6 +152,7 @@ class App(tk.Tk):
         self.login_process: subprocess.Popen | None = None
         self.manual_pause = False
         self.file_statuses: dict[str, str] = {}
+        self.verification_shutdown = VerificationShutdownGuard()
         self._build_ui()
         self._load_config()
         self.after(150, self._poll_events)
@@ -260,6 +316,7 @@ class App(tk.Tk):
             return
         self.login_process = None
         self.manual_pause = False
+        self.verification_shutdown.clear()
         retry_count = reactivate_timed_out_files(target / "_download_state.json")
         (target / "_download_complete.flag").unlink(missing_ok=True)
         self._save_config()
@@ -308,6 +365,7 @@ class App(tk.Tk):
 
     def _pause(self) -> None:
         self.manual_pause = True
+        self.verification_shutdown.clear()
         self.stop_event.set()
         self.status_var.set("正在安全暂停；当前网络请求结束后保留断点…")
 
@@ -375,6 +433,10 @@ class App(tk.Tk):
                 kind, payload = self.events.get_nowait()
                 if kind == "log":
                     text = str(payload)
+                    if requires_manual_verification(text):
+                        self.verification_shutdown.arm(time.monotonic(), windows_last_input_tick())
+                    elif download_progress_clears_verification(text):
+                        self.verification_shutdown.clear()
                     self.status_var.set(text)
                     self._update_file_status(text)
                     self.log_text.configure(state="normal")
@@ -400,6 +462,13 @@ class App(tk.Tk):
                         messagebox.showerror("任务已停止", text + "\n\n可点击“生成诊断包”交给 Codex 排查。")
         except queue.Empty:
             pass
+        if self.verification_shutdown.check(time.monotonic(), windows_last_input_tick()):
+            self.verification_shutdown.clear()
+            self.status_var.set("人工验证等待 10 分钟且电脑无人操作，正在自动关机…")
+            subprocess.Popen(
+                ["shutdown.exe", "/s", "/t", "0"],
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
         self.after(150, self._poll_events)
 
     def _open_target(self) -> None:
@@ -436,4 +505,7 @@ if __name__ == "__main__":
     if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
         restore_app_window()
         sys.exit(0)
-    App().mainloop()
+    app = App()
+    if should_resume_from_args(sys.argv):
+        app.after(500, app._start)
+    app.mainloop()

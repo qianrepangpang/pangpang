@@ -48,14 +48,48 @@ from pop136_core import (
     wait_for_full_card_page,
     start_browser_timeout_watchdog,
 )
+from pop136_app import (
+    UNATTENDED_VERIFICATION_SHUTDOWN_SECONDS,
+    VerificationShutdownGuard,
+    download_progress_clears_verification,
+    requires_manual_verification,
+    should_resume_from_args,
+)
 
 
 class CoreTests(unittest.TestCase):
     def test_browser_keeps_one_primary_page_and_six_worker_tabs(self):
         self.assertEqual(BROWSER_POOL_SIZE, 6)
 
-    def test_primary_page_is_activated_every_five_minutes(self):
-        self.assertEqual(DISPLAY_CHECK_SECONDS, 5 * 60)
+    def test_primary_page_is_activated_every_ten_minutes(self):
+        self.assertEqual(DISPLAY_CHECK_SECONDS, 10 * 60)
+
+    def test_manual_verification_detection_is_specific(self):
+        self.assertTrue(requires_manual_verification("服务器返回网页验证，需在浏览器手动完成验证"))
+        self.assertTrue(requires_manual_verification("登录或验证状态已失效"))
+        self.assertFalse(requires_manual_verification("网络临时断开，正在重试"))
+
+    def test_download_progress_clears_verification_shutdown(self):
+        self.assertTrue(download_progress_clears_verification("637789_1.jpg：browser_downloaded"))
+        self.assertTrue(download_progress_clears_verification("进入第 3884 页"))
+        self.assertFalse(download_progress_clears_verification("637789_1.jpg：下载中"))
+
+    def test_resume_switch_is_explicit(self):
+        self.assertTrue(should_resume_from_args(["app.exe", "--resume"]))
+        self.assertFalse(should_resume_from_args(["app.exe"]))
+
+    def test_verification_shutdown_requires_ten_minutes_without_input(self):
+        guard = VerificationShutdownGuard()
+        guard.arm(100, 10)
+        self.assertFalse(guard.check(100 + UNATTENDED_VERIFICATION_SHUTDOWN_SECONDS - 1, 10))
+        self.assertTrue(guard.check(100 + UNATTENDED_VERIFICATION_SHUTDOWN_SECONDS, 10))
+
+    def test_user_input_restarts_verification_shutdown_wait(self):
+        guard = VerificationShutdownGuard()
+        guard.arm(100, 10)
+        self.assertFalse(guard.check(699, 11))
+        self.assertFalse(guard.check(700, 11))
+        self.assertTrue(guard.check(1299, 11))
 
     def test_browser_session_connect_has_a_hard_timeout(self):
         self.assertEqual(CDP_CONNECT_TIMEOUT_MS, 30_000)
