@@ -23,7 +23,7 @@ from playwright.sync_api import sync_playwright
 
 
 START_URL = "https://yuntu.pop136.com/patternlibrary/"
-APP_VERSION = "2.1.19"
+APP_VERSION = "2.1.20"
 LOGIN_DEBUG_PORT = 9223
 CDP_CONNECT_TIMEOUT_MS = 30_000
 DISPLAY_CHECK_SECONDS = 10 * 60
@@ -801,6 +801,7 @@ class Pop136Engine:
         self._verification_page = None
         self._verification_url = ""
         self._browser_tabs = []
+        self._primary_page = None
         self._display_check_at = 0.0
 
     def log(self, message: str) -> None:
@@ -858,6 +859,7 @@ class Pop136Engine:
                 )
                 if page.is_closed():
                     raise RuntimeError("浏览器页面已关闭，请确认登录状态目录未被其他浏览器占用。")
+                self._primary_page = page
                 closed_pages = close_extra_browser_pages(context, page)
                 if closed_pages:
                     self.log(f"已清理 {closed_pages} 个历史浏览器页面")
@@ -868,6 +870,7 @@ class Pop136Engine:
                     page,
                     BROWSER_POOL_SIZE,
                 )
+                page.bring_to_front()
                 # 2026-09-23 v1.7.6：删除此处「把窗口最小化」的 CDP 调用。
                 # 原代码：Browser.getWindowForTarget + setWindowBounds{windowState:minimized}
                 # 它是「下载全失败」的直接开关（见 browser_launch_args 注释）。
@@ -897,6 +900,7 @@ class Pop136Engine:
                     except Exception:
                         pass
                 self._browser_tabs = []
+                self._primary_page = None
                 # connect_over_cdp 的连接自然断开，登录 Chrome 保持打开。
         self.log("任务已暂停" if self.stop_event.is_set() else "目标年份下载完成")
 
@@ -1163,6 +1167,7 @@ class Pop136Engine:
             nonlocal collected
             if self.stop_event.is_set():
                 return []
+            self._ensure_primary_page(page)
             record = state["processed"].setdefault(card["id"], {"index": card["index"], "files": []})
             record["files"] = []
             record.pop("status", None)
@@ -1405,6 +1410,7 @@ class Pop136Engine:
         for start in range(0, len(entries), batch_limit):
             if self.stop_event.is_set():
                 return
+            self._ensure_primary_page(self._primary_page)
             active = []
             for index, job in enumerate(entries[start:start + batch_limit]):
                 tab = self._browser_tabs[index]

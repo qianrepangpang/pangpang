@@ -6,6 +6,7 @@ import json
 import os
 import queue
 import subprocess
+import sys
 import threading
 import time
 import tkinter as tk
@@ -57,6 +58,23 @@ def download_progress_clears_verification(text: str) -> bool:
 
 def should_resume_from_args(args: list[str]) -> bool:
     return "--resume" in args[1:]
+
+
+def previous_instance_pid_from_args(args: list[str]) -> int | None:
+    try:
+        index = args.index("--wait-for-pid")
+        pid = int(args[index + 1])
+        return pid if pid > 0 else None
+    except (ValueError, IndexError):
+        return None
+
+
+def restart_command(pid: int) -> list[str]:
+    command = [sys.executable]
+    if not getattr(sys, "frozen", False):
+        command.append(str(Path(__file__).resolve()))
+    command.extend(["--resume", "--wait-for-pid", str(pid)])
+    return command
 
 
 class VerificationShutdownGuard:
@@ -351,9 +369,9 @@ class App(tk.Tk):
                 self.events.put(("done", "任务已暂停" if self.stop_event.is_set() else "全部年份下载完成"))
                 return
             except BrowserSessionRecycle:
-                attempt = 0
                 gc.collect()
-                continue
+                self.events.put(("restart", "本页完成，正在释放浏览器资源并自动续传"))
+                return
             except Exception as error:
                 attempt += 1
                 delay = retry_delay_seconds(attempt)
@@ -456,6 +474,14 @@ class App(tk.Tk):
                 elif kind == "file_progress":
                     name, done, total = payload
                     self._update_file_progress(str(name), int(done), int(total) if total is not None else None)
+                elif kind == "restart":
+                    self.status_var.set(str(payload))
+                    subprocess.Popen(
+                        restart_command(os.getpid()),
+                        creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+                    )
+                    self.destroy()
+                    return
                 elif kind in {"done", "error"}:
                     self.start_button.configure(state="normal")
                     self.login_button.configure(state="normal")
@@ -504,8 +530,11 @@ class App(tk.Tk):
 if __name__ == "__main__":
     # 2026-09-23 v1.7.7：单实例互斥。
     # 双实例并行写同一 _download_state.json 会数据竞争（当日守护重置窗口实测两实例并行）。
-    import ctypes
-    import sys
+    previous_pid = previous_instance_pid_from_args(sys.argv)
+    if previous_pid is not None:
+        deadline = time.monotonic() + 60
+        while process_exists(previous_pid) and time.monotonic() < deadline:
+            time.sleep(0.2)
 
     _mutex = ctypes.windll.kernel32.CreateMutexW(None, False, "Local\\POP136Downloader_2")
     if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS

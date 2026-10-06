@@ -54,6 +54,7 @@ from pop136_app import (
     VerificationShutdownGuard,
     download_progress_clears_verification,
     requires_manual_verification,
+    previous_instance_pid_from_args,
     should_resume_from_args,
 )
 
@@ -78,6 +79,11 @@ class CoreTests(unittest.TestCase):
     def test_resume_switch_is_explicit(self):
         self.assertTrue(should_resume_from_args(["app.exe", "--resume"]))
         self.assertFalse(should_resume_from_args(["app.exe"]))
+
+    def test_restart_wait_pid_is_parsed_safely(self):
+        self.assertEqual(previous_instance_pid_from_args(["app.exe", "--wait-for-pid", "123"]), 123)
+        self.assertIsNone(previous_instance_pid_from_args(["app.exe", "--wait-for-pid", "bad"]))
+        self.assertIsNone(previous_instance_pid_from_args(["app.exe"]))
 
     def test_verification_shutdown_requires_ten_minutes_without_input(self):
         guard = VerificationShutdownGuard()
