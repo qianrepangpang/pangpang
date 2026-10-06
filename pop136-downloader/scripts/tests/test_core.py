@@ -363,6 +363,7 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(all(page.closed for page in old_pages))
         tabs = create_browser_pool_tabs(context, main, 4)
         self.assertEqual(len(tabs), 4)
+        self.assertEqual([tab._pop136_target_id for tab in tabs], ['1', '2', '3', '4'])
         self.assertTrue(all(call[1]['newWindow'] is False for call in context.session.calls))
         self.assertTrue(context.session.detached)
 

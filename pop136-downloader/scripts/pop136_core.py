@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import base64
+import gc
 import json
 import os
 import queue
@@ -22,7 +23,7 @@ from playwright.sync_api import sync_playwright
 
 
 START_URL = "https://yuntu.pop136.com/patternlibrary/"
-APP_VERSION = "2.1.12"
+APP_VERSION = "2.1.18"
 LOGIN_DEBUG_PORT = 9223
 CDP_CONNECT_TIMEOUT_MS = 30_000
 DISPLAY_CHECK_SECONDS = 10 * 60
@@ -318,7 +319,9 @@ def create_browser_pool_tabs(context, anchor_page, count: int = 4) -> list:
     try:
         for index in range(count):
             marker = f"about:blank#pop136-pool-{os.getpid()}-{time.time_ns()}-{index}"
-            session.send("Target.createTarget", {"url": marker, "newWindow": False})
+            target_id = session.send(
+                "Target.createTarget", {"url": marker, "newWindow": False}
+            )["targetId"]
             deadline = time.monotonic() + 5
             tab = None
             while time.monotonic() < deadline:
@@ -328,6 +331,7 @@ def create_browser_pool_tabs(context, anchor_page, count: int = 4) -> list:
                 anchor_page.wait_for_timeout(50)
             if tab is None:
                 raise RuntimeError("无法在当前 Chrome 窗口创建下载标签页")
+            setattr(tab, "_pop136_target_id", target_id)
             created.append(tab)
         return created
     except Exception:
@@ -1093,6 +1097,7 @@ class Pop136Engine:
             f"耗时 {elapsed_seconds:.1f} 秒"
         )
         self.progress(handled, len(selected_cards), f"第 {page_no} 页完成")
+        gc.collect()
         return False
 
     def _stream_page_downloads(self, page, page_no: int, cards: list[dict], state: dict) -> None:
@@ -1267,20 +1272,15 @@ class Pop136Engine:
             )
         card_locator = self._locate_card(page, card, page_no)
         card_locator.scroll_into_view_if_needed()
-        card_locator.locator("a").first.click()
-        detail_frame = None
-        for _ in range(80):
-            detail_frame = next(
-                (
-                    frame for frame in page.frames
-                    if "/patternlibrary/detail/" in frame.url
-                    and re.search(rf"[?&]id={re.escape(str(card['id']))}(?:&|$)", frame.url)
-                ),
-                None,
+        def matches_detail(frame) -> bool:
+            return (
+                "/patternlibrary/detail/" in frame.url
+                and re.search(rf"[?&]id={re.escape(str(card['id']))}(?:&|$)", frame.url)
             )
-            if detail_frame is not None:
-                break
-            page.wait_for_timeout(200)
+
+        card_locator.locator("a").first.click()
+        page.wait_for_timeout(3_000)
+        detail_frame = next((frame for frame in page.frames if matches_detail(frame)), None)
         if detail_frame is None:
             raise RuntimeError("详情窗口未打开")
         page.locator(".js-detail-frame").evaluate("element => element.style.display='block'")
@@ -1472,11 +1472,14 @@ class Pop136Engine:
 
     @staticmethod
     def _start_browser_watchdog(context, tab) -> tuple[threading.Timer, threading.Event]:
-        session = context.new_cdp_session(tab)
-        try:
-            target_id = session.send("Target.getTargetInfo")["targetInfo"]["targetId"]
-        finally:
-            session.detach()
+        target_id = getattr(tab, "_pop136_target_id", "")
+        if not target_id:
+            session = context.new_cdp_session(tab)
+            try:
+                target_id = session.send("Target.getTargetInfo")["targetInfo"]["targetId"]
+                setattr(tab, "_pop136_target_id", target_id)
+            finally:
+                session.detach()
         return start_browser_timeout_watchdog(target_id, FILE_DOWNLOAD_TIMEOUT_SECONDS)
 
     def _replace_browser_tab(self, context, index: int) -> None:
