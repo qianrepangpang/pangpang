@@ -23,7 +23,7 @@ from playwright.sync_api import sync_playwright
 
 
 START_URL = "https://yuntu.pop136.com/patternlibrary/"
-APP_VERSION = "2.1.20"
+APP_VERSION = "2.1.26"
 LOGIN_DEBUG_PORT = 9223
 CDP_CONNECT_TIMEOUT_MS = 30_000
 DISPLAY_CHECK_SECONDS = 10 * 60
@@ -421,7 +421,28 @@ def stream_page_jobs(cards, collect_files, submit_job) -> None:
 
 
 def should_checkpoint(completed_items: int) -> bool:
-    return completed_items > 0 and completed_items % 20 == 0
+    return completed_items > 0 and completed_items % EXPECTED_CARDS_PER_PAGE == 0
+
+
+def wait_for_detail_frame(page, item_id: str, timeout_ms: int = 10_000):
+    try:
+        page.wait_for_function(
+            """itemId => Array.from(document.querySelectorAll('.js-detail-frame iframe')).some(frame => {
+                try {
+                    const url = new URL(frame.src, location.href);
+                    return url.pathname.includes('/patternlibrary/detail/')
+                        && url.searchParams.get('id') === itemId;
+                } catch (_) {
+                    return false;
+                }
+            })""",
+            arg=str(item_id),
+            timeout=timeout_ms,
+            polling=100,
+        )
+    except PlaywrightTimeout:
+        return None
+    return page.frame_locator(".js-detail-frame iframe")
 
 
 def retry_delay_seconds(attempt: int) -> int:
@@ -721,7 +742,7 @@ def download_file(
             "User-Agent": "Mozilla/5.0 POP136LocalDownloader/1.0",
             "Referer": "https://yuntu.pop136.com/",
             "Origin": "https://yuntu.pop136.com",
-            "Connection": "close",
+            "Connection": "keep-alive",
         })
         if cookie_header:
             session.headers["Cookie"] = cookie_header
@@ -753,8 +774,7 @@ def download_file(
                     if current and response.status_code != 206:
                         raise RuntimeError(f"服务器拒绝断点续传，HTTP {response.status_code}")
                     with partial.open("ab" if current else "wb") as output:
-                        # CDN 可能只返回几十 KiB 就停顿，8 KiB 写入可确保断点不丢。
-                        for chunk in response.iter_content(chunk_size=8 * 1024):
+                        for chunk in response.iter_content(chunk_size=64 * 1024):
                             if stop_event.is_set():
                                 return {"status": "paused", "bytes": output.tell()}
                             if time.monotonic() >= deadline:
@@ -802,6 +822,7 @@ class Pop136Engine:
         self._verification_url = ""
         self._browser_tabs = []
         self._primary_page = None
+        self._known_names: set[str] = set()
         self._display_check_at = 0.0
 
     def log(self, message: str) -> None:
@@ -827,7 +848,8 @@ class Pop136Engine:
         self.profile.mkdir(parents=True, exist_ok=True)
         state = load_state(self.state_path, self.year)
         repaired = repair_invalid_state_files(state)
-        self.log(f"启动 v{APP_VERSION}，已扫描 {len(existing_names(self.target))} 个已有文件")
+        self._known_names = existing_names(self.target)
+        self.log(f"启动 v{APP_VERSION}，已扫描 {len(self._known_names)} 个已有文件")
         if repaired:
             self.log(f"已清理 {repaired} 个无效断点地址，将重新采集详情")
         if not cdp_ready():
@@ -940,7 +962,7 @@ class Pop136Engine:
             self.log(f"先恢复 {len(recovery_jobs)} 个历史断点")
             cookie_header = self._browser_cookie_header(context, recovery_jobs[0]["url"])
             self._download_jobs(recovery_jobs, state, cookie_header)
-            known = existing_names(self.target)
+            known = self._known_names
             for item_id, record in state["processed"].items():
                 record["completed"] = record_files_complete(self.target, record, item_id, known=known)
             save_state(self.state_path, state)
@@ -963,7 +985,7 @@ class Pop136Engine:
                 remember_browser_routes(state, remaining)
                 self.log("CDN 拦截了非浏览器下载，切换到已登录 Chrome 下载链路")
                 self._download_browser_jobs(context, remaining, state)
-                known = existing_names(self.target)
+                known = self._known_names
                 for item_id, record in state["processed"].items():
                     record["completed"] = record_files_complete(self.target, record, item_id, known=known)
                 save_state(self.state_path, state)
@@ -1110,7 +1132,7 @@ class Pop136Engine:
         return False
 
     def _stream_page_downloads(self, page, page_no: int, cards: list[dict], state: dict) -> None:
-        known = existing_names(self.target)
+        known = self._known_names
         scheduled: set[str] = set()
         results: queue.Queue = queue.Queue()
         workers: list[threading.Thread] = []
@@ -1147,6 +1169,7 @@ class Pop136Engine:
                     self._set_file_status(state, job, result["status"], result.get("bytes"))
                     self.log(f"{job['name']}：{result['status']}")
                     if result["status"] != "paused":
+                        known.add(job["name"].casefold())
                         successful += 1
                 else:
                     status = "verification_required" if isinstance(error, HtmlChallenge) else (
@@ -1230,11 +1253,13 @@ class Pop136Engine:
             workers.append(worker)
             worker.start()
 
+        collection_started = time.monotonic()
         stream_page_jobs(cards, collect, submit)
+        collection_elapsed = time.monotonic() - collection_started
         save_state(self.state_path, state)
         self.log(
             f"流水线已调度 {len(workers)} 个文件；收集与下载同步进行；"
-            f"稳定并发上限 {concurrency_limit}"
+            f"稳定并发上限 {concurrency_limit}；收集耗时 {collection_elapsed:.1f} 秒"
         )
         while any(worker.is_alive() for worker in workers):
             for worker in workers:
@@ -1282,25 +1307,17 @@ class Pop136Engine:
             )
         card_locator = self._locate_card(page, card, page_no)
         card_locator.scroll_into_view_if_needed()
-        def matches_detail(frame) -> bool:
-            return (
-                "/patternlibrary/detail/" in frame.url
-                and re.search(rf"[?&]id={re.escape(str(card['id']))}(?:&|$)", frame.url)
-            )
-
-        card_locator.locator("a").first.click()
-        page.wait_for_timeout(3_000)
-        detail_frame = next((frame for frame in page.frames if matches_detail(frame)), None)
+        card_locator.locator("a").first.evaluate("element => element.click()")
+        detail_frame = wait_for_detail_frame(page, str(card["id"]))
         if detail_frame is None:
             raise RuntimeError("详情窗口未打开")
         page.locator(".js-detail-frame").evaluate("element => element.style.display='block'")
         body_text = detail_frame.locator("body").inner_text(timeout=10_000)
         if "404 Page Not Found" in body_text:
             raise DetailUnavailable("网站详情页返回 404")
-        detail_frame.locator(".js-detail-down").wait_for(state="visible", timeout=20_000)
-        detail_frame.locator(".js-detail-down").click()
-        detail_frame.locator(".js-downimg-right").wait_for(state="visible", timeout=10_000)
-        raw_files = detail_frame.locator(".js-download-btn").evaluate_all(
+        detail_frame.locator(".js-detail-down").evaluate("element => element.click()", timeout=20_000)
+        download_buttons = detail_frame.locator(".js-download-btn")
+        raw_files = download_buttons.evaluate_all(
             """buttons => buttons.map(button => ({
                 name: (button.parentElement?.querySelector('.d-name')?.innerText || '').trim(),
                 relativeUrl: button.getAttribute('data-bp'),
@@ -1326,7 +1343,7 @@ class Pop136Engine:
     def _download_jobs(self, jobs: list[dict], state: dict, cookie_header: str = "") -> None:
         if not jobs:
             return
-        known = existing_names(self.target)
+        known = self._known_names
         unique: dict[str, dict] = {}
         for job in jobs:
             key = job["name"].casefold()
@@ -1366,6 +1383,7 @@ class Pop136Engine:
                     self._set_file_status(state, job, result["status"], result.get("bytes"))
                     self.log(f"{job['name']}：{result['status']}")
                     if result["status"] != "paused":
+                        known.add(job["name"].casefold())
                         successful += 1
                 except Exception as error:
                     status = "verification_required" if isinstance(error, HtmlChallenge) else (
@@ -1390,7 +1408,7 @@ class Pop136Engine:
 
     def _download_browser_jobs(self, context, jobs: list[dict], state: dict) -> None:
         """Use the signed-in Chrome renderer when the CDN blocks non-browser clients."""
-        known = existing_names(self.target)
+        known = self._known_names
         unique: dict[str, dict] = {}
         for job in jobs:
             key = job["name"].casefold()
@@ -1453,6 +1471,7 @@ class Pop136Engine:
                     self.file_progress(job["name"], streamed_size, streamed_size)
                     self._set_file_status(state, job, "downloaded", streamed_size)
                     self.log(f"{job['name']}：browser_downloaded")
+                    known.add(job["name"].casefold())
                     successful += 1
                 except Exception as error:
                     if expired.is_set() and not isinstance(error, DownloadTimeout):

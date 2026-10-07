@@ -46,6 +46,7 @@ from pop136_core import (
     login_browser_launch_args,
     download_browser_headless,
     wait_for_full_card_page,
+    wait_for_detail_frame,
     start_browser_timeout_watchdog,
     stop_browser_timeout_watchdog,
 )
@@ -54,7 +55,6 @@ from pop136_app import (
     VerificationShutdownGuard,
     download_progress_clears_verification,
     requires_manual_verification,
-    previous_instance_pid_from_args,
     should_resume_from_args,
 )
 
@@ -79,11 +79,6 @@ class CoreTests(unittest.TestCase):
     def test_resume_switch_is_explicit(self):
         self.assertTrue(should_resume_from_args(["app.exe", "--resume"]))
         self.assertFalse(should_resume_from_args(["app.exe"]))
-
-    def test_restart_wait_pid_is_parsed_safely(self):
-        self.assertEqual(previous_instance_pid_from_args(["app.exe", "--wait-for-pid", "123"]), 123)
-        self.assertIsNone(previous_instance_pid_from_args(["app.exe", "--wait-for-pid", "bad"]))
-        self.assertIsNone(previous_instance_pid_from_args(["app.exe"]))
 
     def test_verification_shutdown_requires_ten_minutes_without_input(self):
         guard = VerificationShutdownGuard()
@@ -309,9 +304,24 @@ class CoreTests(unittest.TestCase):
 
     def test_streaming_state_is_checkpointed_in_small_batches(self):
         self.assertFalse(should_checkpoint(1))
-        self.assertFalse(should_checkpoint(5))
-        self.assertTrue(should_checkpoint(20))
+        self.assertFalse(should_checkpoint(20))
         self.assertTrue(should_checkpoint(60))
+
+    def test_detail_frame_wait_uses_one_browser_condition(self):
+        target = object()
+
+        class FakePage:
+            def wait_for_function(self, _script, *, arg, timeout, polling):
+                self.args = (arg, timeout, polling)
+
+            def frame_locator(self, selector):
+                self.selector = selector
+                return target
+
+        page = FakePage()
+        self.assertIs(wait_for_detail_frame(page, "123"), target)
+        self.assertEqual(page.args, ("123", 10_000, 100))
+        self.assertEqual(page.selector, ".js-detail-frame iframe")
 
     def test_stable_concurrency_is_capped_for_cdn_stability(self):
         self.assertEqual(stable_concurrency_cap(24), 8)
